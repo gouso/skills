@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Inter, -apple-system, sans-serif; font-size: 13px; color: #333; padding: 12px; background: #fff; }
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  .status { display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 8px; margin-bottom: 12px; }
+  .status.connected { background: #e6f9e6; color: #1a7a1a; }
+  .status.disconnected { background: #fce8e8; color: #c0392b; }
+  .status.connecting { background: #fef9e7; color: #b7950b; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .connected .dot { background: #27ae60; }
+  .disconnected .dot { background: #e74c3c; }
+  .connecting .dot { background: #f1c40f; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .config { margin-bottom: 12px; }
+  label { display: block; font-size: 11px; color: #666; margin-bottom: 4px; font-weight: 500; }
+  input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+  input:focus { outline: none; border-color: #18a0fb; }
+  button { width: 100%; padding: 10px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn-connect { background: #18a0fb; color: #fff; }
+  .btn-connect:hover { background: #0d8de8; }
+  .btn-disconnect { background: #e74c3c; color: #fff; }
+  .btn-disconnect:hover { background: #c0392b; }
+  .log { margin-top: 12px; }
+  .log-title { font-size: 11px; color: #666; font-weight: 500; margin-bottom: 4px; }
+  .log-box { height: 160px; overflow-y: auto; background: #f5f5f5; border-radius: 6px; padding: 8px; font-family: monospace; font-size: 11px; line-height: 1.5; }
+  .log-entry { word-break: break-all; }
+  .log-entry.cmd { color: #2980b9; }
+  .log-entry.ok { color: #27ae60; }
+  .log-entry.err { color: #e74c3c; }
+  .log-entry.info { color: #666; }
+  .stats { display: flex; gap: 12px; margin-top: 8px; font-size: 11px; color: #888; }
+</style>
+</head>
+<body>
+
+<h2>Claude Figma Connector</h2>
+
+<div id="statusBar" class="status disconnected">
+  <span class="dot"></span>
+  <span id="statusText">Disconnected</span>
+</div>
+
+<div class="config">
+  <label>WebSocket Server</label>
+  <input id="wsUrl" type="text" value="ws://127.0.0.1:18765" placeholder="ws://127.0.0.1:18765" />
+</div>
+
+<button id="toggleBtn" class="btn-connect" onclick="toggleConnection()">Connect</button>
+
+<div class="log">
+  <div class="log-title">Activity Log</div>
+  <div id="logBox" class="log-box"></div>
+</div>
+
+<div class="stats">
+  <span>Commands: <strong id="cmdCount">0</strong></span>
+  <span>Errors: <strong id="errCount">0</strong></span>
+</div>
+
+<script>
+let ws = null;
+let cmdCount = 0;
+let errCount = 0;
+
+function setStatus(state, text) {
+  const bar = document.getElementById('statusBar');
+  bar.className = 'status ' + state;
+  document.getElementById('statusText').textContent = text;
+  const btn = document.getElementById('toggleBtn');
+  if (state === 'connected') {
+    btn.textContent = 'Disconnect';
+    btn.className = 'btn-disconnect';
+  } else {
+    btn.textContent = 'Connect';
+    btn.className = 'btn-connect';
+  }
+}
+
+function log(msg, cls) {
+  const box = document.getElementById('logBox');
+  const entry = document.createElement('div');
+  entry.className = 'log-entry ' + (cls || 'info');
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+  entry.textContent = `[${time}] ${msg}`;
+  box.appendChild(entry);
+  box.scrollTop = box.scrollHeight;
+}
+
+function toggleConnection() {
+  if (ws && ws.readyState <= 1) {
+    ws.close();
+  } else {
+    connect();
+  }
+}
+
+function connect() {
+  const url = document.getElementById('wsUrl').value.trim();
+  if (!url) return;
+
+  setStatus('connecting', 'Connecting...');
+  log('Connecting to ' + url);
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    setStatus('connected', 'Connected');
+    log('Connected to bridge server', 'ok');
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected', 'Disconnected');
+    log('Disconnected from bridge', 'err');
+    ws = null;
+  };
+
+  ws.onerror = (e) => {
+    log('WebSocket error', 'err');
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'command') {
+        cmdCount++;
+        document.getElementById('cmdCount').textContent = cmdCount;
+        log(`← ${msg.command}(${JSON.stringify(msg.params || {}).substring(0, 80)})`, 'cmd');
+        // Forward command to plugin code
+        parent.postMessage({ pluginMessage: { type: 'command', requestId: msg.requestId, command: msg.command, params: msg.params } }, '*');
+      }
+    } catch (e) {
+      log('Parse error: ' + e.message, 'err');
+    }
+  };
+}
+
+// Receive responses from plugin code
+onmessage = (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg || msg.type !== 'response') return;
+
+  if (msg.success) {
+    log(`→ OK: ${JSON.stringify(msg.data || {}).substring(0, 100)}`, 'ok');
+  } else {
+    errCount++;
+    document.getElementById('errCount').textContent = errCount;
+    log(`→ ERR: ${msg.error}`, 'err');
+  }
+
+  // Send response back to bridge
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify(msg));
+  }
+};
+</script>
+
+</body>
+</html>
